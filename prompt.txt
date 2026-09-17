@@ -1,0 +1,348 @@
+- génère un app vue vite TS qui permet d’organiser les photos/vidéo : 
+    - système d’analyse de fichier dans un répertoire et les sous répertoires
+    - générateur de rapport : organigramme de hiérarchie de dossier analysé
+    - compteur de fichier, rapport d’analyse et nombre de fichier dans chaque répertoire
+    - trieur de doublon (analyse de l’image)
+    - création de dossier par date année/mois
+
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Stack
+  - Vue 3 + Vite + TypeScript (template officiel)
+  - Accès local via File System Access API (Chrome / Edge)
+  - Lancer : `npm install` puis `npm run dev`
+
+Fonctionnalités livrées
+  1. Analyse récursive d’un dossier (images, vidéos, autres)
+     → src/services/scanner.ts
+  2. Rapport d’analyse (totaux fichiers / images / vidéos / taille / dossiers)
+     → src/components/AnalysisReport.vue
+  3. Organigramme hiérarchique avec compteurs par répertoire
+     → src/components/HierarchyTree.vue
+  4. Détection de doublons par average hash (similarité visuelle, seuil réglable)
+     → src/services/duplicates.ts + DuplicateFinder.vue
+  5. Création de dossiers année/mois + déplacement (ou copie) des médias
+     → src/services/organizer.ts + DateOrganizer.vue
+     (date basée sur lastModified du fichier)
+
+Structure principale
+  src/
+    App.vue
+    types/files.ts
+    services/{scanner,duplicates,organizer}.ts
+    components/{AnalysisReport,HierarchyTree,DuplicateFinder,DateOrganizer}.vue
+
+Limites connues
+  - API dossiers : navigateurs Chromium uniquement (HTTPS ou localhost)
+  - HEIC/HEIF exclus du hash (non décodables nativement)
+  - Organisation par date de modification fichier, pas EXIF
+  - Écriture disque : permission readwrite requise à la sélection du dossier
+
+────────────────────────────────────────────────────────────────
+
+- propose une solution pour le heic HEIF
+- dans le trieur de doublon :
+  - ajoute une fonction pour supprimer les photos en doublons
+  - affiche des tag avec des couleurs pour notifier des potentiel erreur dans les doublons :
+    - si les photos similaire on le meme chemin et que le nom est tres similaire (2 ou 3 caractère different) dans le cas d'une rafale
+  - ajoute un trie des doublons par tag et par pertinence
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 2)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+1. HEIC / HEIF
+  Solution : conversion navigateur via `heic2any` (libheif WASM),
+  chargée en lazy import uniquement quand un fichier .heic/.heif est rencontré.
+  → src/services/heic.ts
+  Utilisé pour le hash doublons et les aperçus.
+  Chunk séparé (~1,3 Mo) pour ne pas alourdir le bundle principal.
+
+2. Suppression des doublons
+  Cases à cocher par fichier, action « Garder la plus lourde »,
+  bouton « Supprimer (n) » avec confirmation + garde-fou
+  (au moins 1 fichier conservé par groupe).
+  → deleteMediaFiles dans src/services/duplicates.ts
+  → UI dans DuplicateFinder.vue
+  Rescan déclenché après suppression.
+
+3. Tags colorés (risques / confiance)
+  - Rafale (ambre) : même dossier + noms distants de 2–3 caractères (Levenshtein)
+  - Tailles différentes (orange)
+  - Hash identique (vert)
+  - Doublon probable (bleu)
+  → buildTags / isBurstPair dans duplicates.ts
+
+4. Tri des groupes
+  Modes : pertinence (score 0–100), tag (rafale d’abord), taille du groupe.
+  → sortDuplicateGroups + sélecteur dans DuplicateFinder.vue
+
+Fichiers touchés
+  src/services/heic.ts (nouveau)
+  src/services/duplicates.ts
+  src/types/files.ts
+  src/types/heic2any.d.ts (nouveau)
+  src/components/DuplicateFinder.vue
+  src/App.vue
+  package.json (+ heic2any)
+
+Limites restantes
+  - Conversion HEIC plus lente que JPEG/PNG natifs
+  - Organisation toujours basée sur lastModified (pas EXIF)
+  - Suppression irréversible côté disque local
+
+────────────────────────────────────────────────────────────────
+
+- sur le trieur de doublon :
+  - ajoute la possibilité d'afficher en grille les photos detecté
+  - ajoute un bouton pour garder la plus legère
+  - les nom de fichier on souvent des numero donc si ils se suivent c'est tres souvent signe d'une rafale
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 3)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+1. Affichage grille
+  Bascule Liste / Grille dans la barre d’outils du trieur.
+  En grille : vignettes cliquables avec checkbox, nom et taille.
+  Aperçus chargés pour toutes les photos de chaque groupe
+  (liste et grille).
+  → DuplicateFinder.vue
+
+2. Bouton « Garder la plus légère »
+  Sélectionne pour suppression toutes les photos sauf la plus
+  petite en poids, en complément de « Garder la plus lourde ».
+  → selectKeepOne(group, 'smallest' | 'largest')
+
+3. Rafale par numéros séquentiels
+  En plus de Levenshtein (2–3 caractères), détection si :
+  - même dossier
+  - même motif de nom (chiffres → #)
+  - un seul compteur numérique diffère de 1 à 3
+  Ex. IMG_0042.jpg / IMG_0043.jpg → tag Rafale.
+  → hasSequentialNumbers / extractNamePattern / isBurstPair
+  → src/services/duplicates.ts
+
+Fichiers touchés
+  src/services/duplicates.ts
+  src/components/DuplicateFinder.vue
+
+────────────────────────────────────────────────────────────────
+
+dans le trieur de doublons, les bouton garder la plus lourde/legere est inversé
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 4)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Boutons « Garder la plus lourde / légère » inversés
+
+Correction
+  1. Logique de conservation réécrite de façon explicite :
+     - lourde → fichier au poids (bytes) maximum
+     - légère → fichier au poids minimum
+     Les autres sont cochés pour suppression.
+     → selectKeepOne() dans DuplicateFinder.vue
+
+  2. Clarification UX (cause probable de l’inversion perçue) :
+     - mention « Cases cochées = fichiers à supprimer »
+     - en grille, sélection marquée en rouge (danger), plus en accent
+     - tooltips sur les boutons Garder…
+
+Fichier touché
+  src/components/DuplicateFinder.vue
+
+────────────────────────────────────────────────────────────────
+
+dans l'outil Organisation par date, ajoute un selecteur pour choisir le niveau de hiérarchie de l'organisation année - mois - jours
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 5)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Sélecteur de niveau de hiérarchie pour l’organisation par date
+    (année / mois / jour)
+
+Livré
+  1. Select « Niveau de hiérarchie » dans Organisation par date :
+     - Année              → 2024/
+     - Année / mois       → 2024/03/     (défaut)
+     - Année / mois / jour → 2024/03/15/
+  2. Aperçu des dossiers et création/déplacement adaptés au niveau.
+  3. Description dynamique selon le niveau choisi.
+
+Fichiers touchés
+  src/services/organizer.ts
+  src/components/DateOrganizer.vue
+
+────────────────────────────────────────────────────────────────
+
+dans l'outil hiérarchie, ajoute la possibilité d'exclure des dossier des autres outil 
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 6)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Dans Hiérarchie : pouvoir exclure des dossiers des autres outils
+
+Livré
+  1. Bouton « Exclure » / « Exclu » sur chaque dossier de l’organigramme.
+     Exclut le dossier et tous ses sous-dossiers.
+  2. Les fichiers exclus sont ignorés par Doublons et Organiser
+     (l’Analyse conserve le rapport complet du scan).
+  3. Bannière globale : nb dossiers exclus + fichiers ignorés,
+     avec action « Tout réintégrer ».
+  4. Sous-dossiers d’un parent exclu : état « Exclu (parent) » (non recliquable).
+  5. Exclusions réinitialisées à chaque nouveau scan.
+
+Fichiers touchés
+  src/services/exclusions.ts (nouveau)
+  src/components/HierarchyTree.vue
+  src/App.vue
+
+────────────────────────────────────────────────────────────────
+
+dans l'outil organiser, organise les dossier en hiérarchie :
+  - année qui contiennent les mois qui contiennent les jours 
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 7)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Organiser : dossiers en hiérarchie année → mois → jours
+
+Livré
+  1. Niveau par défaut passé à « Année → mois → jour »
+     (ex. 2024/03/15/).
+  2. Création imbriquée : chaque année contient ses mois,
+     chaque mois contient ses jours (ensureDir segments).
+  3. Aperçu arborescent (plus de liste plate) :
+     année → mois → jour avec compteurs de fichiers.
+  4. Sélecteur conservé pour raccourcir à année seule
+     ou année → mois si besoin.
+
+Fichiers touchés
+  src/services/organizer.ts (+ buildHierarchyPreview)
+  src/components/DateOrganizer.vue
+
+────────────────────────────────────────────────────────────────
+
+- dans l'outil organiser :
+  - a la fin du traitement de l'organisation, propose de supprimer les répertoire vide
+  - pour les nom de fichier :
+    - garde le format année YYYY
+    - le format mois MM/YYYY
+    - le format jours DD/MM/YYYY
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 8)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Proposer la suppression des répertoires vides en fin d’organisation
+  - Noms de dossiers : année YYYY, mois MM/YYYY, jour DD/MM/YYYY
+
+Livré
+  1. Nommage des dossiers (tiret à la place de « / », interdit en FS) :
+     - année : YYYY              → 2024
+     - mois  : MM-YYYY           → 03-2024  (format MM/YYYY)
+     - jour  : DD-MM-YYYY        → 15-03-2024  (format DD/MM/YYYY)
+     Ex. hiérarchie : 2024/03-2024/15-03-2024/
+  2. Après organisation : scan des répertoires vides + proposition
+     « Supprimer les répertoires vides » / « Conserver ».
+  3. Suppression du plus profond au plus haut (recursive).
+
+Fichiers touchés
+  src/services/organizer.ts
+    (+ formatYear/Month/DayFolder, findEmptyDirectories,
+       removeEmptyDirectories)
+  src/components/DateOrganizer.vue
+
+────────────────────────────────────────────────────────────────
+
+- dans l'outil trieur de doublons :
+  - ajoute un compteur de mémoire gagné a la suppression des doublons selectionné 
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 9)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Compteur de mémoire gagnée à la suppression des doublons sélectionnés
+
+Livré
+  1. Affichage live « Mémoire à gagner » = somme des tailles des
+     fichiers cochés (+ détail dans le bouton Supprimer).
+  2. Compteur « Déjà libéré » cumulé sur la session d’analyse.
+  3. Message post-suppression : fichiers supprimés, octets libérés
+     cette fois, total session.
+  4. Confirmation de suppression inclut aussi la taille à libérer.
+
+Fichier touché
+  src/components/DuplicateFinder.vue
+
+────────────────────────────────────────────────────────────────
+
+- dans l'outil trieur de doublons :
+  - ajoute la possibilité d'utiliser les tag comme des filtres
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 10)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Utiliser les tags comme filtres dans le trieur de doublons
+
+Livré
+  1. Tags de la légende cliquables (filtres cumulables, logique OU).
+  2. Compteur par tag + résumé « X / Y groupes » affichés.
+  3. Bouton « Effacer filtres ».
+  4. Message si aucun groupe ne correspond.
+
+Fichier touché
+  src/components/DuplicateFinder.vue
+
+────────────────────────────────────────────────────────────────
+
+- possibilité d'analyser les fichier RAW ARW ?
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 24 août 2026 (itération 11)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Possibilité d’analyser les fichiers RAW ARW ?
+
+Réponse / livré
+  Oui, partiellement (adapté au navigateur) :
+  1. Les .arw sont classés comme images au scan (+ CR2/NEF/DNG…).
+  2. Le navigateur ne démosaïque pas le RAW : on extrait le plus
+     grand JPEG embarqué (aperçu Sony) pour hash doublons + vignettes.
+  3. Limite : sans JPEG embarqué, le fichier est ignoré pour le hash ;
+     la comparaison porte sur l’aperçu, pas le capteur plein format.
+
+Fichiers touchés
+  src/services/raw.ts (nouveau)
+  src/services/heic.ts (pipeline décodage unifié)
+  src/services/scanner.ts
+  src/components/DuplicateFinder.vue (mention UI)
+
+────────────────────────────────────────────────────────────────
