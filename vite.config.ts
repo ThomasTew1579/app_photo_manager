@@ -1,7 +1,8 @@
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
 
-// https://vite.dev/config/
+// base relatif : fonctionne en local et sur GitHub Pages (sous-chemin du dépôt)
 export default defineConfig({
   plugins: [vue()],
+  base: './',
 })

@@ -1,4 +1,11 @@
 import type { AnalysisReport, DirectoryNode, MediaFile } from '../types/files'
+import { extractExifCreatedAt } from './exif'
+import {
+  isAppMetaFile,
+  oldestTimestamp,
+  readMetaMap,
+  type FileMetaEntry,
+} from './datesStore'
 
 const IMAGE_EXT = new Set([
   '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.heic', '.heif', '.avif',
@@ -24,6 +31,48 @@ function makeId(path: string): string {
   return path
 }
 
+/**
+ * Priorité date :
+ * 1) EXIF (si présent)
+ * 2) createdAt du JSON app (date d’origine avant organisation)
+ * 3) plus ancienne entre lastModified JSON d’origine et mtime FS
+ */
+async function resolveCreatedAt(
+  file: File,
+  type: MediaFile['type'],
+  meta: FileMetaEntry | undefined,
+): Promise<{ createdAt: number; originalLastModified?: number; aHash?: string }> {
+  let exif: number | null = null
+  if (type === 'image') {
+    try {
+      exif = await extractExifCreatedAt(file)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const jsonCreated = meta?.createdAt
+  const jsonMtime = meta?.lastModified
+  const fsMtime = file.lastModified
+
+  // EXIF et JSON createdAt priment sur le mtime FS (souvent = date d’organisation)
+  const createdAt =
+    exif != null
+      ? oldestTimestamp(exif, jsonCreated)
+      : jsonCreated != null
+        ? oldestTimestamp(jsonCreated, jsonMtime, fsMtime)
+        : oldestTimestamp(jsonMtime, fsMtime)
+
+  const aHash =
+    meta?.aHash && (meta.size == null || meta.size === file.size) ? meta.aHash : undefined
+
+  return {
+    createdAt,
+    originalLastModified: jsonMtime,
+    aHash,
+  }
+}
+
 async function scanDirectory(
   dirHandle: FileSystemDirectoryHandle,
   basePath: string,
@@ -34,6 +83,7 @@ async function scanDirectory(
   const node: DirectoryNode = {
     name: dirHandle.name,
     path: basePath,
+    relativePath: relativeBase,
     fileCount: 0,
     imageCount: 0,
     videoCount: 0,
@@ -48,7 +98,11 @@ async function scanDirectory(
   }
   entries.sort((a, b) => a[0].localeCompare(b[0], 'fr'))
 
+  const metaMap = await readMetaMap(dirHandle)
+
   for (const [name, handle] of entries) {
+    if (isAppMetaFile(name)) continue
+
     const path = `${basePath}/${name}`
     const relativePath = relativeBase ? `${relativeBase}/${name}` : name
 
@@ -69,6 +123,7 @@ async function scanDirectory(
       const fileHandle = handle as FileSystemFileHandle
       const file = await fileHandle.getFile()
       const type = classifyFile(name, file.type)
+      const resolved = await resolveCreatedAt(file, type, metaMap[name])
       const media: MediaFile = {
         id: makeId(path),
         name,
@@ -78,6 +133,9 @@ async function scanDirectory(
         type,
         mimeType: file.type || 'application/octet-stream',
         lastModified: file.lastModified,
+        createdAt: resolved.createdAt,
+        originalLastModified: resolved.originalLastModified,
+        aHash: resolved.aHash,
         handle: fileHandle,
         parentPath: basePath,
       }
@@ -131,4 +189,59 @@ export function formatDate(ts: number): string {
 
 export function isDirectoryPickerSupported(): boolean {
   return typeof window !== 'undefined' && 'showDirectoryPicker' in window
+}
+
+/** Dossier sans aucun fichier dans toute la sous-arborescence. */
+export function isEmptyDirectory(node: DirectoryNode): boolean {
+  return node.fileCount === 0
+}
+
+function recountNode(node: DirectoryNode): DirectoryNode {
+  const children = node.children
+  const fileCount =
+    node.files.length + children.reduce((sum, c) => sum + c.fileCount, 0)
+  const imageCount =
+    node.files.filter((f) => f.type === 'image').length +
+    children.reduce((sum, c) => sum + c.imageCount, 0)
+  const videoCount =
+    node.files.filter((f) => f.type === 'video').length +
+    children.reduce((sum, c) => sum + c.videoCount, 0)
+  const totalSize =
+    node.files.reduce((sum, f) => sum + f.size, 0) +
+    children.reduce((sum, c) => sum + c.totalSize, 0)
+  return { ...node, children, fileCount, imageCount, videoCount, totalSize }
+}
+
+/**
+ * Retire un dossier (et sa sous-arborescence) de l’arbre en mémoire,
+ * sans rescanner le disque.
+ */
+export function removeDirectoryByRelativePath(
+  root: DirectoryNode,
+  relativePath: string,
+): DirectoryNode {
+  if (!relativePath) return root
+
+  function walk(node: DirectoryNode): DirectoryNode | null {
+    if (node.relativePath === relativePath) return null
+    let changed = false
+    const children: DirectoryNode[] = []
+    for (const child of node.children) {
+      const next = walk(child)
+      if (next === null) {
+        changed = true
+        continue
+      }
+      if (next !== child) changed = true
+      children.push(next)
+    }
+    if (!changed) return node
+    return recountNode({ ...node, children })
+  }
+
+  return walk(root) ?? root
+}
+
+export function countDirectories(node: DirectoryNode): number {
+  return 1 + node.children.reduce((sum, child) => sum + countDirectories(child), 0)
 }

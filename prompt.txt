@@ -346,3 +346,277 @@ Fichiers touchés
   src/components/DuplicateFinder.vue (mention UI)
 
 ────────────────────────────────────────────────────────────────
+
+
+- revois toute l'interface visuelle, je veux que ça ressemble a l'interface de l'application Photos de Apple
+- je veux pouvoir selectionner un périphérique entier ou un dossier spécifique 
+- apres la selection du peripherique ou du dossier, l'interface fonctionne comme l'application Photos et permet de naviger dans toutes les photos et vidée disponible avec la possibilité de les trier 
+- ajoute dans des onglet les fonctions déja disponible dans l'appli existante
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 17 septembre 2026 (itération 12)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Interface façon app Photos (Apple)
+  - Sélection périphérique entier OU dossier
+  - Navigation photos/vidéos + tri après import
+  - Fonctions existantes en onglets
+
+Livré
+  1. Refonte visuelle type Photos :
+     sidebar grise, accent bleu #0071e3, typo système Apple,
+     grille serrée, barre sticky translucide.
+  2. Écran d’accueil avec 2 actions :
+     « Importer un périphérique » / « Choisir un dossier »
+     (même API File System ; périphérique = racine du volume).
+  3. Onglet Bibliothèque : grille navigable, filtres
+     Tout / Photos / Vidéos, tri (date, nom, taille, type),
+     visionneuse plein écran.
+  4. Sidebar (desktop) + nav mobile : Bibliothèque, Analyse,
+     Hiérarchie, Doublons, Organiser — outils existants conservés.
+
+Fichiers touchés
+  src/App.vue (shell Photos)
+  src/style.css (thème)
+  src/components/PhotoLibrary.vue (nouveau)
+  src/types/files.ts
+  index.html
+
+────────────────────────────────────────────────────────────────
+
+- dans l'outil hiérarchie, met en évidence les dossier vide et ajoute une fonction pour les supprimer
+- utilise en priorité la date de création des fichiers
+- lance l'outil de recherche de doublon automatiquement en tache de fond avec un seuil par defaut de 2
+- dans la fonction organiser : 
+  - ajoute la posibilité de choisir le format du nom des photos déplacé
+    - nom d'origine
+    - date complete + nom d'origine
+    - juste la date
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 17 septembre 2026 (itération 13)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Hiérarchie : mettre en évidence dossiers vides + suppression
+  - Priorité date de création des fichiers
+  - Doublons auto en arrière-plan (seuil 2)
+  - Organiser : formats de nom (origine / date+origine / date seule)
+
+Livré
+  1. Hiérarchie : dossiers vides surlignés (badge « Vide ») + bouton
+     Supprimer (récursif sur le sous-arbre vide).
+  2. Date prioritaire `createdAt` : EXIF DateTimeOriginal/Digitized/
+     DateTime pour JPEG, sinon lastModified. Utilisée pour tri
+     bibliothèque et organisation.
+  3. Après chaque import/scan : recherche doublons en fond (seuil 2),
+     badge dans la sidebar, résultats injectés dans Doublons.
+  4. Organiser : sélecteur de nom —
+     nom d’origine | date complète + nom | juste la date
+     (collisions gérées par suffixe _2, _3…).
+
+Fichiers touchés
+  src/services/exif.ts (nouveau)
+  src/services/scanner.ts
+  src/services/organizer.ts
+  src/services/duplicates.ts
+  src/types/files.ts
+  src/components/HierarchyTree.vue
+  src/components/DateOrganizer.vue
+  src/components/DuplicateFinder.vue
+  src/components/PhotoLibrary.vue
+  src/App.vue
+
+Limite
+  - Pas de birthtime FS côté navigateur ; hors JPEG EXIF → lastModified.
+
+────────────────────────────────────────────────────────────────
+
+- modifie le style pour avoir le style sombre de l'application
+- dans la bibliotheque, ajoute des séparateur de d'année et de mois dans la grille de photos et un indicateur de date dynamique (qui change en fonction du scroll dans la bibliotheque, qui analyse la premiere ligne de photos) sur la meme ligne que le nome du dossier/peripherique 
+- propose des idée pour optimiser la vitesse de traitement du trieur de doublon, je pensais afficher le resultat toute les sans photos analysé pour pouvoir trier pendant le traitement. dit moi si c'est une bonne idée ou si tu peux faire plus optimal
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 17 septembre 2026 (itération 14)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Style sombre type Photos
+  - Bibliothèque : séparateurs année/mois + indicateur de date au scroll
+  - Optimisation trieur de doublons (résultats progressifs ?)
+
+Livré
+  1. Thème sombre Photos (#1c1c1e / #2c2c2e, accent #0a84ff).
+  2. Grille découpée en blocs année + mois ; date dynamique
+     (mois année) à côté du nom source, mise à jour selon la
+     première ligne visible au scroll.
+  3. Doublons : résultats partiels toutes les 40 images +
+     parallelisme 4 + yield UI (idle/timeout) pour trier pendant
+     le traitement.
+
+Avis optimisation (idée « afficher tous les N photos »)
+  Oui, c’est une bonne idée — déjà implémentée (N=40).
+  Avantages : feedback immédiat, UI utilisable pendant le scan.
+  Compléments plus efficaces encore (piste future) :
+  - Worker Web pour le hash (évite de bloquer le main thread)
+  - Cache des hash par path+size+mtime (rescan instantané)
+  - Downscale plus agressif avant aHash (canvas 8×8 déjà, mais
+    décoder en thumbnail plus petit pour HEIC/RAW)
+  - Index exact (Map hash) pour distance 0 avant Hamming
+  - Virtualiser la liste des groupes dans l’UI
+
+Fichiers touchés
+  src/style.css
+  src/App.vue
+  src/components/PhotoLibrary.vue
+  src/components/HierarchyTree.vue
+  src/components/DuplicateFinder.vue
+  src/services/duplicates.ts
+
+────────────────────────────────────────────────────────────────
+
+- la suppression de dossier vide dans la hiérarchie ne peux pas faire réimporter toutes les photos, c'est trop contregnant, trouve une solution 
+- pendant le traitement de la recherche des doublons, a chaque ajout d'element dans la liste, elle est remise a jours et ça efface toutes les selection que j'ai fait pendand le chargement, c'est possible de remedier a ça ?
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 17 septembre 2026 (itération 15)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Suppression dossier vide sans réimporter toutes les photos
+  - Conserver les sélections pendant le chargement progressif des doublons
+
+Livré
+  1. Suppression dossier vide : maj locale de l’arbre en mémoire
+     (removeDirectoryByRelativePath) — plus de runScan / réimport.
+  2. Sélections doublons stables :
+     - clé = file.id (plus groupId::fileId)
+     - mergeGroups préserve les cases cochées à chaque partial
+     - seules les sélections de fichiers disparus sont retirées
+
+Fichiers touchés
+  src/services/scanner.ts
+  src/App.vue
+  src/components/DuplicateFinder.vue
+
+────────────────────────────────────────────────────────────────
+
+trouve une solution pour qu'au déplacement des photos, la date de creation original de l'image ne soit pas modifié
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 15 octobre 2026 (itération 16)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Au déplacement, ne pas perdre la date de création originale
+
+Contexte
+  L’API File System Access réécrit le lastModified FS à chaque write :
+  impossible de conserver la « date de création » Finder/Explorer.
+
+Solution livrée
+  1. Copie binaire inchangée si le JPEG a déjà un EXIF date.
+  2. Sinon (JPEG sans EXIF) : injection DateTimeOriginal / DateTime
+     pour que la date survive dans le fichier.
+  3. Pour tous les formats : registre `_dates.json` par dossier
+     destination (nom → timestamp createdAt).
+  4. Au scan : priorité EXIF → `_dates.json` → lastModified.
+  5. `_dates.json` ignoré dans les compteurs / dossiers « vides ».
+
+Fichiers touchés
+  src/services/datesStore.ts (nouveau)
+  src/services/exif.ts
+  src/services/organizer.ts
+  src/services/scanner.ts
+  src/components/DateOrganizer.vue (mention UI)
+
+Limite restante
+  - La date affichée par le système de fichiers (mtime/birthtime OS)
+    reste celle de l’écriture navigateur ; l’app et les outils EXIF
+    voient la bonne date de prise de vue.
+
+────────────────────────────────────────────────────────────────
+
+- base le trie de l'organisation sur la date de création des fichier (pas la date de derniere modification, dans tout les cas la date la plus vieille)
+- ajoute l'option d'arreter l'analyse de doublon
+
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 15 octobre 2026 (itération 17)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Organisation sur date de création (toujours la plus ancienne)
+  - Pouvoir arrêter l’analyse des doublons
+
+Livré
+  1. Date d’organisation / scan = min(EXIF, _dates.json, lastModified)
+     via oldestTimestamp — jamais la seule date de modification si
+     une date plus vieille existe.
+  2. Bouton « Arrêter » pendant l’analyse doublons (fond ou manuelle).
+     AbortSignal + conservation des groupes déjà trouvés.
+
+Fichiers touchés
+  src/services/datesStore.ts
+  src/services/scanner.ts
+  src/services/organizer.ts
+  src/services/duplicates.ts
+  src/types/files.ts
+  src/App.vue
+  src/components/DuplicateFinder.vue
+  src/components/DateOrganizer.vue
+
+────────────────────────────────────────────────────────────────
+
+- dans le fichier json, ajoute le niveau se similarité avec d'autre images afin de pouvoir trier les - doublon plus rapidement apres une opératoins d'organisation
+- ajoute aussi la date de création et de derniere modification dans le json
+- si un fichier json generé par l'appplication est trouvé dans un sous dossier (cas d'une deuxieme analyse) utilise le json pour accelerer le trie et les recherche de doublon
+- pour chaque image copier ou déplacer, ajoute la date de création du fichier original dans les data du fichier qui pourrons etre analysé en priorité par rapport a la date de création (car la date de création des image est daté a la date du traitement de l'organiosation par l'appli et donc ça fausse l'analyse)
+
+────────────────────────────────────────────────────────────────
+RAPPORT D’IMPLÉMENTATION — 17 octobre 2026 (itération 18)
+────────────────────────────────────────────────────────────────
+
+Statut : terminé — build `npm run build` OK.
+
+Consignes
+  - Enrichir le JSON avec similarité + dates création / modification
+  - Réutiliser le JSON au re-scan pour accélérer tri et doublons
+  - Prioriser la date de création d’origine après organisation
+    (le mtime FS = date du traitement)
+
+Livré
+  1. Nouveau registre `_photo_meta.json` (v2) par dossier :
+     createdAt, lastModified (origine), size, aHash, similar[].
+     Ancien `_dates.json` encore lu en secours / migré à l’écriture.
+  2. Organisation : à chaque copie/déplacement, écrit les dates
+     d’origine dans le meta destination (+ EXIF JPEG si besoin).
+     Au scan suivant : EXIF → createdAt JSON → mtimes (oldest).
+  3. Doublons : réutilise aHash du JSON si taille cohérente ;
+     après analyse, persiste aHash + voisins similaires (distance
+     Hamming) pour accélérer les passes suivantes.
+  4. Fichiers meta ignorés dans le scan et les dossiers « vides ».
+
+Fichiers touchés
+  src/services/datesStore.ts
+  src/services/scanner.ts
+  src/services/organizer.ts
+  src/services/duplicates.ts
+  src/types/files.ts
+  src/App.vue
+  src/components/DuplicateFinder.vue
+  src/components/DateOrganizer.vue
+
+Limite restante
+  - Le Finder/Explorer continue d’afficher le mtime d’écriture
+    navigateur ; l’app et EXIF / `_photo_meta.json` portent la
+    date logique d’origine.
+
+────────────────────────────────────────────────────────────────

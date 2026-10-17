@@ -5,6 +5,12 @@ import type {
   DuplicateTagKind,
   MediaFile,
 } from '../types/files'
+import {
+  persistMetasUnderRoot,
+  removeMetaEntry,
+  type FileMetaEntry,
+  type SimilarRef,
+} from './datesStore'
 import { toDecodableImageBlob } from './heic'
 
 const HASH_SIZE = 8
@@ -198,29 +204,34 @@ export interface DuplicateScanOptions {
   /** Distance de Hamming max pour considérer deux images comme similaires (0 = identiques). */
   threshold?: number
   onProgress?: (done: number, total: number) => void
+  /** Résultats partiels pendant le scan (tous les `partialEvery` fichiers). */
+  onPartial?: (groups: DuplicateGroup[], done: number, total: number) => void
+  /** Fréquence d’émission des résultats partiels (défaut 40). */
+  partialEvery?: number
+  /** Nombre de hashs calculés en parallèle (défaut 4). */
+  concurrency?: number
+  /** Permet d’interrompre l’analyse (résultats partiels conservés). */
+  signal?: AbortSignal
+  /**
+   * Racine FS : si fournie, écrit aHash + similarités dans `_photo_meta.json`
+   * pour accélérer les analyses suivantes.
+   */
+  persistRoot?: FileSystemDirectoryHandle
 }
 
-export async function findDuplicateImages(
-  files: MediaFile[],
-  options: DuplicateScanOptions = {},
-): Promise<DuplicateGroup[]> {
-  const threshold = options.threshold ?? 5
-  const images = files.filter((f) => f.type === 'image')
-  const hashed: Array<{ file: MediaFile; hash: string }> = []
-
-  for (let i = 0; i < images.length; i++) {
-    const media = images[i]
-    options.onProgress?.(i + 1, images.length)
-    try {
-      const raw = await media.handle.getFile()
-      const blob = await toDecodableImageBlob(raw, media.name)
-      const hash = await computeAverageHash(blob)
-      hashed.push({ file: media, hash })
-    } catch {
-      // Image illisible — on ignore
-    }
+export class DuplicateScanAbortedError extends Error {
+  readonly groups: DuplicateGroup[]
+  constructor(groups: DuplicateGroup[]) {
+    super('Analyse des doublons interrompue')
+    this.name = 'DuplicateScanAbortedError'
+    this.groups = groups
   }
+}
 
+function buildGroupsFromHashed(
+  hashed: Array<{ file: MediaFile; hash: string }>,
+  threshold: number,
+): DuplicateGroup[] {
   const used = new Set<number>()
   const groups: DuplicateGroup[] = []
 
@@ -252,6 +263,122 @@ export async function findDuplicateImages(
   }
 
   return sortDuplicateGroups(groups, 'pertinence')
+}
+
+function yieldToMain(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => resolve(), { timeout: 32 })
+    } else {
+      setTimeout(resolve, 0)
+    }
+  })
+}
+
+function buildSimilarUpdates(
+  hashed: Array<{ file: MediaFile; hash: string }>,
+  threshold: number,
+): Array<{ relativePath: string; entry: FileMetaEntry }> {
+  const updates: Array<{ relativePath: string; entry: FileMetaEntry }> = []
+
+  for (let i = 0; i < hashed.length; i++) {
+    const similar: SimilarRef[] = []
+    for (let j = 0; j < hashed.length; j++) {
+      if (i === j) continue
+      const distance = hammingDistance(hashed[i].hash, hashed[j].hash)
+      if (distance <= threshold) {
+        similar.push({
+          name: hashed[j].file.name,
+          relativePath: hashed[j].file.relativePath,
+          distance,
+        })
+      }
+    }
+    similar.sort((a, b) => a.distance - b.distance)
+    // Garde les voisins les plus proches (évite des JSON énormes)
+    const topSimilar = similar.slice(0, 12)
+    const f = hashed[i].file
+    updates.push({
+      relativePath: f.relativePath,
+      entry: {
+        createdAt: f.createdAt,
+        lastModified: f.originalLastModified ?? f.lastModified,
+        size: f.size,
+        aHash: hashed[i].hash,
+        similar: topSimilar.length ? topSimilar : undefined,
+      },
+    })
+    f.aHash = hashed[i].hash
+  }
+
+  return updates
+}
+
+export async function findDuplicateImages(
+  files: MediaFile[],
+  options: DuplicateScanOptions = {},
+): Promise<DuplicateGroup[]> {
+  const threshold = options.threshold ?? 2
+  const partialEvery = options.partialEvery ?? 40
+  const concurrency = Math.max(1, options.concurrency ?? 4)
+  const signal = options.signal
+  const images = files.filter((f) => f.type === 'image')
+  const hashed: Array<{ file: MediaFile; hash: string }> = []
+  let done = 0
+  const total = images.length
+
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new DuplicateScanAbortedError(buildGroupsFromHashed(hashed, threshold))
+    }
+  }
+
+  async function hashOne(media: MediaFile) {
+    throwIfAborted()
+    try {
+      // Réutilise le aHash du JSON / scan précédent si taille cohérente
+      if (media.aHash && media.aHash.length >= HASH_SIZE * HASH_SIZE) {
+        hashed.push({ file: media, hash: media.aHash })
+        return
+      }
+      const raw = await media.handle.getFile()
+      throwIfAborted()
+      const blob = await toDecodableImageBlob(raw, media.name)
+      throwIfAborted()
+      const hash = await computeAverageHash(blob)
+      media.aHash = hash
+      hashed.push({ file: media, hash })
+    } catch (e) {
+      if (e instanceof DuplicateScanAbortedError) throw e
+      /* ignore decode errors */
+    } finally {
+      done += 1
+      options.onProgress?.(done, total)
+      if (done % partialEvery === 0 || done === total) {
+        options.onPartial?.(buildGroupsFromHashed(hashed, threshold), done, total)
+        await yieldToMain()
+      }
+    }
+  }
+
+  for (let i = 0; i < images.length; i += concurrency) {
+    throwIfAborted()
+    const batch = images.slice(i, i + concurrency)
+    await Promise.all(batch.map((m) => hashOne(m)))
+  }
+
+  throwIfAborted()
+  const groups = buildGroupsFromHashed(hashed, threshold)
+
+  if (options.persistRoot && hashed.length > 0) {
+    try {
+      await persistMetasUnderRoot(options.persistRoot, buildSimilarUpdates(hashed, threshold))
+    } catch {
+      /* persistance best-effort */
+    }
+  }
+
+  return groups
 }
 
 export function sortDuplicateGroups(
@@ -291,6 +418,11 @@ export async function deleteMediaFile(
   let dir = root
   for (let i = 0; i < parts.length - 1; i++) {
     dir = await dir.getDirectoryHandle(parts[i])
+  }
+  try {
+    await removeMetaEntry(dir, name)
+  } catch {
+    /* ignore */
   }
   await dir.removeEntry(name)
 }

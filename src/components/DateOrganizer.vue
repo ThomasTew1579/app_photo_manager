@@ -6,9 +6,11 @@ import {
   buildOrganizePlan,
   findEmptyDirectories,
   HIERARCHY_OPTIONS,
+  NAME_FORMAT_OPTIONS,
   organizeByDate,
   removeEmptyDirectories,
   type DateHierarchyLevel,
+  type FileNameFormat,
   type OrganizeResult,
 } from '../services/organizer'
 
@@ -26,6 +28,7 @@ const cleaning = ref(false)
 const progress = ref({ done: 0, total: 0 })
 const moveFiles = ref(true)
 const hierarchy = ref<DateHierarchyLevel>('day')
+const nameFormat = ref<FileNameFormat>('original')
 const result = ref<OrganizeResult | null>(null)
 const error = ref('')
 const emptyDirs = ref<string[]>([])
@@ -36,7 +39,13 @@ const hierarchyMeta = computed(
   () => HIERARCHY_OPTIONS.find((o) => o.value === hierarchy.value) ?? HIERARCHY_OPTIONS[2],
 )
 
-const plan = computed(() => buildOrganizePlan(props.files, hierarchy.value))
+const nameFormatMeta = computed(
+  () => NAME_FORMAT_OPTIONS.find((o) => o.value === nameFormat.value) ?? NAME_FORMAT_OPTIONS[0],
+)
+
+const plan = computed(() =>
+  buildOrganizePlan(props.files, hierarchy.value, nameFormat.value),
+)
 
 const treePreview = computed(() => buildHierarchyPreview(plan.value))
 
@@ -55,6 +64,7 @@ async function run() {
     result.value = await organizeByDate(props.rootHandle, props.files, {
       move: moveFiles.value,
       level: hierarchy.value,
+      nameFormat: nameFormat.value,
       onProgress: (done, total) => {
         progress.value = { done, total }
       },
@@ -108,11 +118,12 @@ function skipRemoveEmpty() {
     <header>
       <h2>Organisation par date</h2>
       <p>
-        Hiérarchie <strong>année → mois → jour</strong> avec noms
-        <code>YYYY</code> /
-        <code>MM-YYYY</code> (MM/YYYY) /
-        <code>DD-MM-YYYY</code> (DD/MM/YYYY).
-        Ex. <code>{{ hierarchyMeta.example }}</code>
+        Hiérarchie <strong>année → mois → jour</strong> basée sur la
+        <strong>date la plus ancienne</strong> (EXIF / registre / mtime).
+        Noms : <code>{{ nameFormatMeta.example }}</code> · dossiers
+        <code>{{ hierarchyMeta.example }}</code>
+        Les dates d’origine sont préservées (EXIF JPEG +
+        <code>_photo_meta.json</code> : createdAt, lastModified, aHash).
       </p>
     </header>
 
@@ -121,6 +132,14 @@ function skipRemoveEmpty() {
         Niveau de hiérarchie
         <select v-model="hierarchy">
           <option v-for="opt in HIERARCHY_OPTIONS" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+      </label>
+      <label class="field">
+        Nom des fichiers
+        <select v-model="nameFormat">
+          <option v-for="opt in NAME_FORMAT_OPTIONS" :key="opt.value" :value="opt.value">
             {{ opt.label }}
           </option>
         </select>

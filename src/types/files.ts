@@ -6,7 +6,17 @@ export interface MediaFile {
   size: number
   type: 'image' | 'video' | 'other'
   mimeType: string
+  /** Date de modification FS actuelle. */
   lastModified: number
+  /**
+   * Date de création logique : EXIF, sinon meta JSON (origine),
+   * sinon la plus ancienne entre mtime JSON d’origine et mtime FS.
+   */
+  createdAt: number
+  /** lastModified d’origine issu du JSON app (si connu). */
+  originalLastModified?: number
+  /** aHash mis en cache (JSON ou calcul doublons). */
+  aHash?: string
   handle: FileSystemFileHandle
   parentPath: string
 }
@@ -14,6 +24,8 @@ export interface MediaFile {
 export interface DirectoryNode {
   name: string
   path: string
+  /** Chemin relatif à la racine sélectionnée (sans le nom racine). */
+  relativePath: string
   fileCount: number
   imageCount: number
   videoCount: number
@@ -55,4 +67,8 @@ export interface DuplicateGroup {
 
 export type DuplicateSortMode = 'pertinence' | 'tag' | 'taille-groupe'
 
-export type AppTab = 'analyse' | 'hierarchie' | 'doublons' | 'organiser'
+export type AppTab = 'bibliotheque' | 'analyse' | 'hierarchie' | 'doublons' | 'organiser'
+
+export type LibrarySortMode = 'date-desc' | 'date-asc' | 'name' | 'size' | 'type'
+
+export type SourceKind = 'device' | 'folder'

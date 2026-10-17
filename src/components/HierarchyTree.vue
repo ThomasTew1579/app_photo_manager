@@ -1,19 +1,23 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { DirectoryNode } from '../types/files'
-import { formatSize } from '../services/scanner'
+import { formatSize, isEmptyDirectory } from '../services/scanner'
 
 const props = defineProps<{
   node: DirectoryNode
   depth?: number
   excludedPaths: string[]
+  /** Empêche de supprimer la racine. */
+  isRoot?: boolean
 }>()
 
 const emit = defineEmits<{
   toggleExclude: [path: string]
+  deleteEmpty: [relativePath: string]
 }>()
 
 const depth = computed(() => props.depth ?? 0)
+const empty = computed(() => isEmptyDirectory(props.node))
 
 const isExcluded = computed(() => props.excludedPaths.includes(props.node.path))
 
@@ -29,23 +33,45 @@ function onToggle() {
   if (isExcludedByParent.value) return
   emit('toggleExclude', props.node.path)
 }
+
+function onDeleteEmpty() {
+  if (!empty.value || props.isRoot || !props.node.relativePath) return
+  if (
+    !confirm(
+      `Supprimer le dossier vide « ${props.node.name} » et ses sous-dossiers vides ?`,
+    )
+  ) {
+    return
+  }
+  emit('deleteEmpty', props.node.relativePath)
+}
 </script>
 
 <template>
   <div
     class="tree-node"
-    :class="{ excluded: effectivelyExcluded }"
+    :class="{ excluded: effectivelyExcluded, empty }"
     :style="{ '--depth': depth }"
   >
     <div class="tree-row">
-      <span class="tree-icon" aria-hidden="true">📁</span>
+      <span class="tree-icon" aria-hidden="true">{{ empty ? '📂' : '📁' }}</span>
       <span class="tree-name">{{ node.name }}</span>
+      <span v-if="empty" class="tag-empty">Vide</span>
       <span class="tree-meta">
         {{ node.fileCount }} fichier{{ node.fileCount > 1 ? 's' : '' }}
         · {{ node.imageCount }} img
         · {{ node.videoCount }} vid
         · {{ formatSize(node.totalSize) }}
       </span>
+      <button
+        v-if="empty && !isRoot && node.relativePath"
+        type="button"
+        class="btn-delete-empty"
+        title="Supprimer ce dossier vide"
+        @click="onDeleteEmpty"
+      >
+        Supprimer
+      </button>
       <button
         type="button"
         class="btn-exclude"
@@ -71,6 +97,7 @@ function onToggle() {
         :depth="depth + 1"
         :excluded-paths="excludedPaths"
         @toggle-exclude="emit('toggleExclude', $event)"
+        @delete-empty="emit('deleteEmpty', $event)"
       />
     </div>
   </div>
@@ -87,6 +114,15 @@ function onToggle() {
 
 .tree-node.excluded > .tree-row .tree-name {
   text-decoration: line-through;
+}
+
+.tree-node.empty > .tree-row {
+  background: var(--empty-folder-bg);
+  border: 1px solid var(--empty-folder-border);
+}
+
+.tree-node.empty > .tree-row:hover {
+  background: #4a3c18;
 }
 
 .tree-row {
@@ -112,13 +148,25 @@ function onToggle() {
   color: var(--text);
 }
 
+.tag-empty {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--warning-text);
+  background: #5c4a1a;
+  border-radius: 999px;
+  padding: 0.15rem 0.45rem;
+}
+
 .tree-meta {
   font-size: 0.8rem;
   color: var(--muted);
   flex: 1;
 }
 
-.btn-exclude {
+.btn-exclude,
+.btn-delete-empty {
   appearance: none;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -138,15 +186,27 @@ function onToggle() {
 }
 
 .btn-exclude.active {
-  background: #fff0ee;
+  background: #5c1f1c;
   border-color: var(--danger);
-  color: var(--danger);
+  color: #ff8a80;
 }
 
 .btn-exclude.locked,
 .btn-exclude:disabled {
   opacity: 0.7;
   cursor: not-allowed;
+}
+
+.btn-delete-empty {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+
+.btn-delete-empty:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: #fff0ee;
 }
 
 .tree-children {

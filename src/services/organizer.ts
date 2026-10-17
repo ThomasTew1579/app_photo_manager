@@ -1,6 +1,19 @@
 import type { MediaFile } from '../types/files'
+import { ensureJpegCreationDate, isJpegName } from './exif'
+import {
+  isAppMetaFile,
+  oldestTimestamp,
+  readMetaMap,
+  removeMetaEntry,
+  writeMetaMap,
+  type FileMetaEntry,
+  type MetaMap,
+} from './datesStore'
 
 export type DateHierarchyLevel = 'year' | 'month' | 'day'
+
+/** Format du nom de fichier après organisation. */
+export type FileNameFormat = 'original' | 'date-original' | 'date-only'
 
 export interface OrganizeResult {
   moved: number
@@ -16,6 +29,7 @@ export interface OrganizePlanItem {
   day: string
   folderSegments: string[]
   folderKey: string
+  targetName: string
   targetRelative: string
 }
 
@@ -27,6 +41,20 @@ export const HIERARCHY_OPTIONS: Array<{
   { value: 'year', label: 'Année seulement (YYYY)', example: '2024/' },
   { value: 'month', label: 'Année → mois (MM-YYYY)', example: '2024/03-2024/' },
   { value: 'day', label: 'Année → mois → jour (DD-MM-YYYY)', example: '2024/03-2024/15-03-2024/' },
+]
+
+export const NAME_FORMAT_OPTIONS: Array<{
+  value: FileNameFormat
+  label: string
+  example: string
+}> = [
+  { value: 'original', label: 'Nom d’origine', example: 'IMG_1234.jpg' },
+  {
+    value: 'date-original',
+    label: 'Date complète + nom d’origine',
+    example: '15-03-2024_14-30-00_IMG_1234.jpg',
+  },
+  { value: 'date-only', label: 'Juste la date', example: '15-03-2024_14-30-00.jpg' },
 ]
 
 export interface HierarchyPreviewNode {
@@ -100,6 +128,48 @@ export function formatDayFolder(d: Date): string {
   return `${pad2(d.getDate())}-${pad2(d.getMonth() + 1)}-${d.getFullYear()}`
 }
 
+function extensionOf(name: string): string {
+  const i = name.lastIndexOf('.')
+  return i >= 0 ? name.slice(i) : ''
+}
+
+function basenameOf(name: string): string {
+  const i = name.lastIndexOf('.')
+  return i >= 0 ? name.slice(0, i) : name
+}
+
+/** Horodatage fichier : DD-MM-YYYY_HH-mm-ss */
+export function formatFullDateStamp(d: Date): string {
+  return `${pad2(d.getDate())}-${pad2(d.getMonth() + 1)}-${d.getFullYear()}_${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`
+}
+
+export function buildTargetFileName(
+  file: MediaFile,
+  nameFormat: FileNameFormat,
+  usedNames: Set<string>,
+): string {
+  const d = new Date(file.createdAt)
+  const ext = extensionOf(file.name)
+  const stamp = formatFullDateStamp(d)
+  let base: string
+  if (nameFormat === 'original') {
+    base = basenameOf(file.name)
+  } else if (nameFormat === 'date-original') {
+    base = `${stamp}_${basenameOf(file.name)}`
+  } else {
+    base = stamp
+  }
+
+  let candidate = `${base}${ext}`
+  let n = 2
+  while (usedNames.has(candidate.toLowerCase())) {
+    candidate = `${base}_${n}${ext}`
+    n++
+  }
+  usedNames.add(candidate.toLowerCase())
+  return candidate
+}
+
 export function buildFolderSegments(
   year: string,
   month: string,
@@ -114,24 +184,36 @@ export function buildFolderSegments(
 export function buildOrganizePlan(
   files: MediaFile[],
   level: DateHierarchyLevel = 'day',
+  nameFormat: FileNameFormat = 'original',
 ): OrganizePlanItem[] {
+  const usedByFolder = new Map<string, Set<string>>()
   return files
     .filter((f) => f.type === 'image' || f.type === 'video')
     .map((file) => {
-      const d = new Date(file.lastModified)
+      // Organisation toujours sur la date la plus ancienne connue
+      const dateTs = oldestTimestamp(file.createdAt, file.lastModified)
+      const d = new Date(dateTs)
       const year = formatYearFolder(d)
       const month = formatMonthFolder(d)
       const day = formatDayFolder(d)
       const folderSegments = buildFolderSegments(year, month, day, level)
       const folderKey = folderSegments.join('/')
+      let used = usedByFolder.get(folderKey)
+      if (!used) {
+        used = new Set()
+        usedByFolder.set(folderKey, used)
+      }
+      const fileForName = { ...file, createdAt: dateTs }
+      const targetName = buildTargetFileName(fileForName, nameFormat, used)
       return {
-        file,
+        file: fileForName,
         year,
         month,
         day,
         folderSegments,
         folderKey,
-        targetRelative: `${folderKey}/${file.name}`,
+        targetName,
+        targetRelative: `${folderKey}/${targetName}`,
       }
     })
 }
@@ -175,18 +257,30 @@ export async function organizeByDate(
   options: {
     move?: boolean
     level?: DateHierarchyLevel
+    nameFormat?: FileNameFormat
     onProgress?: (done: number, total: number) => void
   } = {},
 ): Promise<OrganizeResult> {
   const move = options.move ?? true
   const level = options.level ?? 'day'
-  const plan = buildOrganizePlan(files, level)
+  const nameFormat = options.nameFormat ?? 'original'
+  const plan = buildOrganizePlan(files, level, nameFormat)
   const created = new Set<string>()
+  const metaCache = new Map<string, MetaMap>()
   const result: OrganizeResult = {
     moved: 0,
     skipped: 0,
     createdFolders: [],
     errors: [],
+  }
+
+  async function metaFor(dir: FileSystemDirectoryHandle, folderKey: string): Promise<MetaMap> {
+    let map = metaCache.get(folderKey)
+    if (!map) {
+      map = await readMetaMap(dir)
+      metaCache.set(folderKey, map)
+    }
+    return map
   }
 
   for (let i = 0; i < plan.length; i++) {
@@ -206,15 +300,42 @@ export async function organizeByDate(
       }
 
       const sourceFile = await item.file.handle.getFile()
-      const destHandle = await destDir.getFileHandle(item.file.name, { create: true })
+      // Copie binaire ; pour JPEG sans EXIF on injecte la date connue pour survivre au mtime FS.
+      let payload: Blob = sourceFile
+      if (isJpegName(item.targetName) || isJpegName(item.file.name)) {
+        payload = await ensureJpegCreationDate(sourceFile, item.file.createdAt)
+      }
+
+      const destHandle = await destDir.getFileHandle(item.targetName, { create: true })
       const writable = await destHandle.createWritable()
-      await writable.write(sourceFile)
+      await writable.write(payload)
       await writable.close()
+
+      // Date d’origine prioritaire sur le mtime FS (= date d’organisation).
+      const entry: FileMetaEntry = {
+        createdAt: item.file.createdAt,
+        lastModified: item.file.originalLastModified ?? item.file.lastModified,
+        size: item.file.size,
+        aHash: item.file.aHash,
+      }
+      const destMeta = await metaFor(destDir, item.folderKey)
+      destMeta[item.targetName] = entry
 
       if (move) {
         const parentInfo = await getParentHandle(rootHandle, item.file.relativePath)
         if (parentInfo) {
-          await parentInfo.parent.removeEntry(parentInfo.name)
+          const samePlace =
+            item.file.name === item.targetName &&
+            (item.file.relativePath === item.targetRelative ||
+              item.file.relativePath.endsWith(`/${item.targetRelative}`))
+          if (!samePlace) {
+            try {
+              await removeMetaEntry(parentInfo.parent, parentInfo.name)
+            } catch {
+              /* ignore */
+            }
+            await parentInfo.parent.removeEntry(parentInfo.name)
+          }
         }
       }
 
@@ -222,6 +343,18 @@ export async function organizeByDate(
     } catch (err) {
       result.errors.push(
         `${item.file.relativePath}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  // Persiste les méta (dates d’origine + hash) par dossier destination
+  for (const [folderKey, map] of metaCache) {
+    try {
+      const dir = await ensureDir(rootHandle, folderKey.split('/').filter(Boolean))
+      await writeMetaMap(dir, map)
+    } catch (err) {
+      result.errors.push(
+        `_photo_meta.json (${folderKey}): ${err instanceof Error ? err.message : String(err)}`,
       )
     }
   }
@@ -243,8 +376,10 @@ export async function findEmptyDirectories(
     let hasFiles = false
 
     for await (const [name, handle] of dir.entries()) {
-      if (handle.kind === 'file') hasFiles = true
-      else subdirs.push({ name, handle: handle as FileSystemDirectoryHandle })
+      if (handle.kind === 'file') {
+        if (isAppMetaFile(name)) continue
+        hasFiles = true
+      } else subdirs.push({ name, handle: handle as FileSystemDirectoryHandle })
     }
 
     let allChildrenEmpty = true

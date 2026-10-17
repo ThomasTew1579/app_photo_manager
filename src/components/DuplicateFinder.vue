@@ -9,6 +9,7 @@ import type {
 import {
   createPreviewUrl,
   deleteMediaFiles,
+  DuplicateScanAbortedError,
   findDuplicateImages,
   sortDuplicateGroups,
 } from '../services/duplicates'
@@ -24,17 +25,22 @@ const TAG_FILTERS: Array<{ kind: DuplicateTagKind; label: string }> = [
 const props = defineProps<{
   files: MediaFile[]
   rootHandle: FileSystemDirectoryHandle | null
+  /** Groupes précalculés en tâche de fond (App). */
+  backgroundGroups?: DuplicateGroup[] | null
+  backgroundLoading?: boolean
+  backgroundProgress?: { done: number; total: number }
 }>()
 
 const emit = defineEmits<{
   deleted: []
+  stop: []
 }>()
 
 const groups = ref<DuplicateGroup[]>([])
 const loading = ref(false)
 const deleting = ref(false)
 const progress = ref({ done: 0, total: 0 })
-const threshold = ref(5)
+const threshold = ref(2)
 const sortMode = ref<DuplicateSortMode>('pertinence')
 const viewMode = ref<'liste' | 'grille'>('liste')
 const activeTagFilters = ref<DuplicateTagKind[]>([])
@@ -44,6 +50,10 @@ const error = ref('')
 const deleteMessage = ref('')
 /** Espace cumulé libéré lors des suppressions de cette session d’analyse. */
 const savedBytesTotal = ref(0)
+const usedBackground = ref(false)
+let manualAbort: AbortController | null = null
+
+const isBusy = computed(() => loading.value || !!props.backgroundLoading)
 
 const filteredGroups = computed(() => {
   if (activeTagFilters.value.length === 0) return groups.value
@@ -75,7 +85,7 @@ const selectedFiles = computed(() => {
   const list: MediaFile[] = []
   for (const group of groups.value) {
     for (const file of group.files) {
-      if (selected.value[fileKey(group.id, file.id)]) list.push(file)
+      if (selected.value[file.id]) list.push(file)
     }
   }
   return list
@@ -106,10 +116,9 @@ function clearTagFilters() {
 async function loadAllPreviews(nextGroups: DuplicateGroup[]) {
   for (const group of nextGroups) {
     for (const file of group.files) {
-      const key = fileKey(group.id, file.id)
-      if (previews.value[key]) continue
+      if (previews.value[file.id]) continue
       try {
-        previews.value[key] = await createPreviewUrl(file)
+        previews.value[file.id] = await createPreviewUrl(file)
       } catch {
         /* ignore */
       }
@@ -117,8 +126,49 @@ async function loadAllPreviews(nextGroups: DuplicateGroup[]) {
   }
 }
 
+/** Met à jour les groupes sans effacer les sélections en cours. */
+async function mergeGroups(next: DuplicateGroup[], opts: { resetSelection?: boolean } = {}) {
+  groups.value = next
+  if (opts.resetSelection) {
+    selected.value = {}
+    activeTagFilters.value = []
+    revokePreviews()
+  } else {
+    // Ne garde que les sélections toujours présentes
+    const alive = new Set(next.flatMap((g) => g.files.map((f) => f.id)))
+    const kept: Record<string, boolean> = {}
+    for (const [id, on] of Object.entries(selected.value)) {
+      if (on && alive.has(id)) kept[id] = true
+    }
+    selected.value = kept
+  }
+  await loadAllPreviews(next)
+}
+
+watch(
+  () => props.backgroundGroups,
+  async (next) => {
+    if (next && !loading.value) {
+      usedBackground.value = true
+      await mergeGroups(next)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => props.backgroundProgress,
+  (p) => {
+    if (p && props.backgroundLoading) progress.value = p
+  },
+)
+
 async function scan() {
+  manualAbort?.abort()
+  const ac = new AbortController()
+  manualAbort = ac
   loading.value = true
+  usedBackground.value = false
   error.value = ''
   deleteMessage.value = ''
   groups.value = []
@@ -127,38 +177,58 @@ async function scan() {
   activeTagFilters.value = []
   revokePreviews()
   try {
-    groups.value = await findDuplicateImages(props.files, {
+    const next = await findDuplicateImages(props.files, {
       threshold: threshold.value,
+      partialEvery: 40,
+      concurrency: 4,
+      signal: ac.signal,
+      persistRoot: props.rootHandle ?? undefined,
       onProgress: (done, total) => {
         progress.value = { done, total }
       },
+      onPartial: async (partial) => {
+        await mergeGroups(partial)
+      },
     })
-    await loadAllPreviews(groups.value)
+    await mergeGroups(next)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (e instanceof DuplicateScanAbortedError) {
+      await mergeGroups(e.groups)
+      deleteMessage.value = `Analyse interrompue — ${e.groups.length} groupe(s) conservé(s).`
+    } else {
+      error.value = e instanceof Error ? e.message : String(e)
+    }
   } finally {
     loading.value = false
+    if (manualAbort === ac) manualAbort = null
   }
 }
 
-function fileKey(groupId: string, fileId: string): string {
-  return `${groupId}::${fileId}`
+function stopScan() {
+  if (loading.value) {
+    manualAbort?.abort()
+  }
+  if (props.backgroundLoading) {
+    emit('stop')
+  }
 }
 
-function toggleFile(groupId: string, fileId: string) {
-  const key = fileKey(groupId, fileId)
-  selected.value = { ...selected.value, [key]: !selected.value[key] }
+function isSelected(fileId: string): boolean {
+  return !!selected.value[fileId]
+}
+
+function toggleFile(fileId: string) {
+  selected.value = { ...selected.value, [fileId]: !selected.value[fileId] }
 }
 
 function selectKeepOne(group: DuplicateGroup, prefer: 'largest' | 'smallest') {
-  // Garder = ne pas sélectionner pour suppression ; les autres sont cochés.
   const keep =
     prefer === 'largest'
       ? group.files.reduce((best, f) => (f.size > best.size ? f : best))
       : group.files.reduce((best, f) => (f.size < best.size ? f : best))
   const next = { ...selected.value }
   for (const file of group.files) {
-    next[fileKey(group.id, file.id)] = file.id !== keep.id
+    next[file.id] = file.id !== keep.id
   }
   selected.value = next
 }
@@ -178,7 +248,7 @@ async function deleteSelected() {
   const bytesToFree = toDelete.reduce((sum, f) => sum + f.size, 0)
 
   for (const group of groups.value) {
-    const marked = group.files.filter((f) => selected.value[fileKey(group.id, f.id)])
+    const marked = group.files.filter((f) => selected.value[f.id])
     if (marked.length >= group.files.length) {
       error.value =
         'Impossible de supprimer toutes les photos d’un groupe. Gardez-en au moins une.'
@@ -214,10 +284,9 @@ async function deleteSelected() {
     for (const group of groups.value) {
       for (const file of group.files) {
         if (deletedIds.has(file.relativePath)) {
-          const key = fileKey(group.id, file.id)
-          const url = previews.value[key]
+          const url = previews.value[file.id]
           if (url) URL.revokeObjectURL(url)
-          delete previews.value[key]
+          delete previews.value[file.id]
         }
       }
     }
@@ -229,7 +298,12 @@ async function deleteSelected() {
       }))
       .filter((g) => g.files.length > 1)
 
-    selected.value = {}
+    const alive = new Set(groups.value.flatMap((g) => g.files.map((f) => f.id)))
+    const kept: Record<string, boolean> = {}
+    for (const [id, on] of Object.entries(selected.value)) {
+      if (on && alive.has(id)) kept[id] = true
+    }
+    selected.value = kept
     emit('deleted')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -256,7 +330,10 @@ watch(
   },
 )
 
-onBeforeUnmount(revokePreviews)
+onBeforeUnmount(() => {
+  manualAbort?.abort()
+  revokePreviews()
+})
 </script>
 
 <template>
@@ -267,6 +344,8 @@ onBeforeUnmount(revokePreviews)
         <p>
           Analyse visuelle (average hash), y compris HEIC/HEIF et RAW (ARW via JPEG embarqué).
           Tags colorés pour signaler les rafales (noms proches ou numéros qui se suivent).
+          <span v-if="backgroundLoading"> Analyse en arrière-plan…</span>
+          <span v-else-if="usedBackground && groups.length"> Résultats auto (seuil 2).</span>
         </p>
       </div>
       <div class="controls">
@@ -275,8 +354,20 @@ onBeforeUnmount(revokePreviews)
           <input v-model.number="threshold" type="range" min="0" max="12" />
           <span>{{ threshold }}</span>
         </label>
-        <button type="button" class="btn primary" :disabled="loading || !files.length" @click="scan">
-          {{ loading ? `Analyse… ${progress.done}/${progress.total}` : 'Lancer l’analyse' }}
+        <button type="button" class="btn primary" :disabled="isBusy || !files.length" @click="scan">
+          {{
+            isBusy
+              ? `Analyse… ${progress.done}/${progress.total}`
+              : 'Relancer l’analyse'
+          }}
+        </button>
+        <button
+          v-if="isBusy"
+          type="button"
+          class="btn danger"
+          @click="stopScan"
+        >
+          Arrêter
         </button>
       </div>
     </header>
@@ -427,12 +518,12 @@ onBeforeUnmount(revokePreviews)
             <label class="row">
               <input
                 type="checkbox"
-                :checked="!!selected[fileKey(group.id, file.id)]"
-                @change="toggleFile(group.id, file.id)"
+                :checked="isSelected(file.id)"
+                @change="toggleFile(file.id)"
               />
               <img
-                v-if="previews[fileKey(group.id, file.id)]"
-                :src="previews[fileKey(group.id, file.id)]"
+                v-if="previews[file.id]"
+                :src="previews[file.id]"
                 :alt="file.name"
                 class="thumb-sm"
               />
@@ -447,18 +538,18 @@ onBeforeUnmount(revokePreviews)
             v-for="file in group.files"
             :key="file.id"
             class="grid-card"
-            :class="{ checked: !!selected[fileKey(group.id, file.id)] }"
+            :class="{ checked: isSelected(file.id) }"
           >
             <input
               type="checkbox"
               class="grid-check"
-              :checked="!!selected[fileKey(group.id, file.id)]"
-              @change="toggleFile(group.id, file.id)"
+              :checked="isSelected(file.id)"
+              @change="toggleFile(file.id)"
             />
             <div class="grid-thumb">
               <img
-                v-if="previews[fileKey(group.id, file.id)]"
-                :src="previews[fileKey(group.id, file.id)]"
+                v-if="previews[file.id]"
+                :src="previews[file.id]"
                 :alt="file.name"
               />
               <span v-else class="grid-placeholder">Aperçu</span>
